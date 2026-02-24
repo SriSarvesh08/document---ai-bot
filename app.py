@@ -9,63 +9,86 @@ from pypdf import PdfReader
 from docx import Document as DocxDocument
 from pptx import Presentation
 
+# =============================
+# CONFIGURATION
+# =============================
+
 DATA_FOLDER = "data"
 MODEL_NAME = "llama-3.3-70b-versatile"
 
-st.set_page_config(page_title="RAGenius-ChatBot", layout="wide")
+st.set_page_config(
+    page_title="RAGenius-ChatBot",
+    layout="wide"
+)
+
+# =============================
+# CUSTOM CSS
+# =============================
 
 st.markdown("""
 <style>
+
 .stApp {
     background-color: #0F172A;
     color: white;
 }
-h1 {
-    color: #38BDF8;
+
+.sidebar .sidebar-content {
+    background-color: #020617;
 }
-.response-box {
+
+.chat-user {
+    background-color: #1E293B;
+    padding: 10px;
+    border-radius: 10px;
+    margin-bottom: 5px;
+}
+
+.chat-bot {
     background-color: #334155;
-    padding: 20px;
-    border-radius: 12px;
-    height: 300px;
-    overflow: auto;
-    color: white;
+    padding: 10px;
+    border-radius: 10px;
+    margin-bottom: 10px;
 }
+
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🧠 RAGenius-ChatBot")
-
-import os
-from groq import Groq
+# =============================
+# GROQ CLIENT
+# =============================
 
 groq_client = Groq(
     api_key=os.getenv("GROQ_API_KEY")
 )
 
 def call_llm(prompt):
-    chat_completion = groq_client.chat.completions.create(
+
+    completion = groq_client.chat.completions.create(
         messages=[{"role": "user", "content": prompt}],
         model=MODEL_NAME,
-        temperature=0.0,
+        temperature=0
     )
-    return chat_completion.choices[0].message.content
+
+    return completion.choices[0].message.content
 
 
-# -------------------------
-# File Loaders
-# -------------------------
+# =============================
+# FILE LOADERS
+# =============================
 
-def load_pdf(file_path):
-    reader = PdfReader(file_path)
-    return "\n".join([page.extract_text() or "" for page in reader.pages])
+def load_pdf(path):
+    reader = PdfReader(path)
+    return "\n".join([p.extract_text() or "" for p in reader.pages])
 
-def load_docx(file_path):
-    doc = DocxDocument(file_path)
+
+def load_docx(path):
+    doc = DocxDocument(path)
     return "\n".join([p.text for p in doc.paragraphs])
 
-def load_ppt(file_path):
-    prs = Presentation(file_path)
+
+def load_ppt(path):
+    prs = Presentation(path)
     text = ""
     for slide in prs.slides:
         for shape in slide.shapes:
@@ -73,44 +96,55 @@ def load_ppt(file_path):
                 text += shape.text + "\n"
     return text
 
-def load_txt(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
+
+def load_txt(path):
+    with open(path, "r", encoding="utf-8") as f:
         return f.read()
 
-def load_all_documents():
-    documents = []
+
+def load_documents():
+
+    docs = []
 
     if not os.path.exists(DATA_FOLDER):
-        return documents
+        return docs
 
     for file in os.listdir(DATA_FOLDER):
+
         path = os.path.join(DATA_FOLDER, file)
 
         try:
+
             if file.endswith(".pdf"):
                 text = load_pdf(path)
+
             elif file.endswith(".docx"):
                 text = load_docx(path)
+
             elif file.endswith(".pptx"):
                 text = load_ppt(path)
+
             elif file.endswith(".txt"):
                 text = load_txt(path)
+
             else:
                 continue
 
-            documents.append(Document(page_content=text))
+            docs.append(Document(page_content=text))
+
         except:
-            continue
+            pass
 
-    return documents
+    return docs
 
 
-# -------------------------
-# Vector Store Creation
-# -------------------------
+# =============================
+# VECTOR STORE
+# =============================
 
 def create_vector_store():
-    docs = load_all_documents()
+
+    docs = load_documents()
 
     if not docs:
         return None
@@ -126,69 +160,81 @@ def create_vector_store():
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
-    return FAISS.from_documents(chunks, embeddings)
+    vectorstore = FAISS.from_documents(
+        chunks,
+        embeddings
+    )
+
+    return vectorstore
 
 
-# # Initialize session state
-# if "vector_store" not in st.session_state:
-#     st.session_state.vector_store = create_vector_store()
+# =============================
+# SESSION STATE INIT
+# =============================
 
-if "response" not in st.session_state:
-    st.session_state.response = ""
 if "vector_store" not in st.session_state:
     st.session_state.vector_store = None
 
-# -------------------------
-# RAG Query Function
-# -------------------------
+if "chats" not in st.session_state:
+    st.session_state.chats = {}
+
+if "current_chat" not in st.session_state:
+    st.session_state.current_chat = "Chat 1"
+    st.session_state.chats["Chat 1"] = []
+
+if "chat_counter" not in st.session_state:
+    st.session_state.chat_counter = 1
+
+
+# =============================
+# QUERY FUNCTION
+# =============================
 
 def unified_query(question):
 
     vector_store = st.session_state.vector_store
-    question_lower = question.lower()
 
-    # Detect type of answer
-    if "brief" in question_lower:
-        length_instruction = "Give a brief answer in 1-2 short sentences."
-    elif "explain" in question_lower or "detailed" in question_lower:
-        length_instruction = "Provide a clear and detailed explanation in 5-6 sentences."
+    q_lower = question.lower()
+
+    if "brief" in q_lower:
+        instruction = "Give brief answer in 2 sentences."
+
+    elif "explain" in q_lower:
+        instruction = "Explain clearly in 5 sentences."
+
     else:
-        length_instruction = "Answer in exactly 3 complete sentences."
+        instruction = "Answer clearly in 3 sentences."
 
-    # 🟢 No file uploaded → GK mode
+
+    # NORMAL MODE
     if vector_store is None:
-        prompt = f"""
-You are an intelligent AI assistant.
 
-{length_instruction}
+        prompt = f"""
+You are an AI assistant.
+
+{instruction}
 
 Question:
 {question}
 
 Answer:
 """
+
         return call_llm(prompt)
 
-    # 🟢 File uploaded → RAG mode
+
+    # RAG MODE
     docs = vector_store.similarity_search(question, k=3)
 
     if not docs:
-        return "No details found in the uploaded documents."
+        return "No details found in documents."
 
-    context = "\n".join([doc.page_content for doc in docs]).strip()
-
-    if not context:
-        return "No details found in the uploaded documents."
+    context = "\n".join([d.page_content for d in docs])
 
     prompt = f"""
-You are a RAG assistant.
+Use ONLY context.
 
-{length_instruction}
-
-Answer ONLY using the provided context.
-If the answer is not clearly present, respond exactly with:
-
-No details found in the uploaded documents.
+{instruction}
 
 Context:
 {context}
@@ -201,62 +247,131 @@ Answer:
 
     return call_llm(prompt)
 
-# -------------------------
-# UI
-# -------------------------
 
-st.markdown("### 🤖 Response")
+# =============================
+# SIDEBAR
+# =============================
 
-st.markdown(
-    f"""
-    <div class="response-box">
-    {st.session_state.response}
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+st.sidebar.title("💬 Chats")
 
-st.markdown("<br>", unsafe_allow_html=True)
+# NEW CHAT
+if st.sidebar.button("➕ New Chat"):
 
-col1, col2 = st.columns([4, 1])
+    st.session_state.chat_counter += 1
+
+    chat_name = f"Chat {st.session_state.chat_counter}"
+
+    st.session_state.chats[chat_name] = []
+
+    st.session_state.current_chat = chat_name
+
+    st.rerun()
+
+
+# SEARCH
+search = st.sidebar.text_input("Search chat")
+
+
+# CHAT LIST
+for chat in st.session_state.chats:
+
+    if search.lower() in chat.lower():
+
+        if st.sidebar.button(chat):
+            st.session_state.current_chat = chat
+            st.rerun()
+
+
+# =============================
+# MAIN UI
+# =============================
+
+st.title("🧠 RAGenius-ChatBot")
+
+st.subheader(st.session_state.current_chat)
+
+chat_area = st.container()
+
+with chat_area:
+
+    for msg in st.session_state.chats[st.session_state.current_chat]:
+
+        if msg["role"] == "user":
+
+            st.markdown(
+                f'<div class="chat-user">🧑 {msg["content"]}</div>',
+                unsafe_allow_html=True
+            )
+
+        else:
+
+            st.markdown(
+                f'<div class="chat-bot">🤖 {msg["content"]}</div>',
+                unsafe_allow_html=True
+            )
+
+
+# =============================
+# INPUT AREA
+# =============================
+
+col1, col2 = st.columns([4,1])
 
 with col1:
-    with st.form("question_form", clear_on_submit=True):
-        question = st.text_input("💬 Ask your question")
-        submit = st.form_submit_button("Send")
+
+    with st.form("input", clear_on_submit=True):
+
+        question = st.text_input("Ask question")
+
+        send = st.form_submit_button("Send")
+
 
 with col2:
-    uploaded_file = st.file_uploader(
-        "📂 Upload",
-        type=["pdf", "docx", "pptx", "txt"]
+
+    uploaded = st.file_uploader(
+        "Upload file",
+        type=["pdf","docx","pptx","txt"]
     )
 
 
-# -------------------------
-# File Upload Handling
-# -------------------------
+# =============================
+# FILE UPLOAD
+# =============================
 
-if uploaded_file is not None:
+if uploaded:
+
     os.makedirs(DATA_FOLDER, exist_ok=True)
 
-    save_path = os.path.join(DATA_FOLDER, uploaded_file.name)
+    path = os.path.join(DATA_FOLDER, uploaded.name)
 
-    with open(save_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
+    with open(path, "wb") as f:
+        f.write(uploaded.getbuffer())
 
-    st.success("File uploaded successfully!")
+    st.success("Uploaded")
 
-    # Rebuild vector store immediately
     st.session_state.vector_store = create_vector_store()
-    st.success("Knowledge base updated!")
+
+    st.success("Knowledge updated")
 
 
-# -------------------------
-# Question Handling
-# -------------------------
+# =============================
+# MESSAGE PROCESS
+# =============================
 
-if submit and question:
-    with st.spinner("Generating response..."):
+if send and question:
+
+    current = st.session_state.current_chat
+
+    st.session_state.chats[current].append(
+        {"role":"user","content":question}
+    )
+
+    with st.spinner("Thinking..."):
+
         answer = unified_query(question)
-        st.session_state.response = answer
-        st.rerun()
+
+    st.session_state.chats[current].append(
+        {"role":"assistant","content":answer}
+    )
+
+    st.rerun()
